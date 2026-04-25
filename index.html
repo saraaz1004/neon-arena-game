@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="sr">
+<head>
+  <meta charset="utf-8" />
+  <title>Neon Arena - ECS (Space Alien)</title>
+  <style>
+    html, body { height: 100%; }
+    body { margin: 0; background:#000; }
+    #gameCanvas { display:block; margin:0 auto; background:#000; outline:1px solid #222; }
+
+    #restartBtn {
+      position: absolute;
+      left: 50%;
+      top: 55%;
+      transform: translate(-50%, -50%);
+      padding: 10px 24px;
+      border-radius: 8px;
+      border: none;
+      font-family: monospace;
+      font-size: 16px;
+      background: #ff4d88;
+      color: #fff;
+      cursor: pointer;
+      box-shadow: 0 0 18px rgba(255,77,136,0.7);
+      display: none;
+    }
+    #restartBtn:hover {
+      background: #ff6c9d;
+    }
+  </style>
+</head>
+<body></body>
+<script>
+  
+  const Id       = (id)     => ({ id });
+  const Position = (x, y)   => ({ Position: { x, y } });
+  const Velocity = (vx, vy) => ({ Velocity: { vx, vy } });
+  const Player   = ()       => ({ Player: true });
+  const Enemy    = ()       => ({ Enemy: true });
+  const Bullet   = ()       => ({ Bullet: true });
+  const Size     = (radius) => ({ Size: { radius } });
+  const Health   = (value)  => ({ Health: { value } });
+  const createEntity = (...components) => Object.assign({}, ...components);
+
+  
+  const PLAYER_THEME = {
+    aura: 'rgba(255,192,203,0.15)', 
+    body: '#ffc0cb',
+    dome: '#ffe4ef',
+    head: '#ff9bbd'
+  };
+
+  const ENEMY_THEMES = [
+    { aura:'rgba(255,77,136,0.12)',  body:'#ff4d88', dome:'#ff9bbd', head:'#ff6fa5' },
+    { aura:'rgba(0,200,255,0.12)',   body:'#00bfff', dome:'#7fd2ff', head:'#4bb7ff' },
+    { aura:'rgba(200,255,120,0.12)', body:'#cfff70', dome:'#e8ffb0', head:'#9dff3f' },
+    { aura:'rgba(255,200,80,0.12)',  body:'#ffb347', dome:'#ffd59f', head:'#ff9933' }
+  ];
+
+  
+  const canvasWidth = 800, canvasHeight = 600;
+
+  const canvas = document.createElement('canvas');
+  canvas.id = 'gameCanvas';
+  canvas.width  = canvasWidth;
+  canvas.height = canvasHeight;
+  document.body.appendChild(canvas);
+  const ctx = canvas.getContext('2d');
+
+  let score = 0;
+  let gameOver = false;
+
+  // Osnovne vrednosti 
+  const BASE_BULLET_SPEED    = 8.5;
+  const BASE_BULLET_SIZE     = 3.5;
+  const BASE_SHOT_COOLDOWN   = 180;
+  const BASE_DAMAGE_PER_HIT  = 0.3;
+
+  // Trenutne vrednosti 
+  let bulletSpeed  = BASE_BULLET_SPEED;
+  let bulletSize   = BASE_BULLET_SIZE;
+  let shotCooldown = BASE_SHOT_COOLDOWN;
+  let damageFactor = 1.0;           // 1 = puna steta, 0 = nikakva steta
+
+  // Bonus stanje
+  let powerLevel  = 0;              
+  let buffActive  = false;          
+  let buffEndTime = 0;              // dokle bonus važi (u ms)
+
+  
+  function checkBonus(t) {
+    const levelByScore = Math.floor(score / 100); 
+
+    if (levelByScore > powerLevel) {
+      powerLevel = levelByScore;
+      buffActive = true;
+      buffEndTime = t + 8000; // 8 sekundi od trenutnog vremena
+
+      
+      bulletSpeed  = BASE_BULLET_SPEED  + powerLevel * 2;
+      bulletSize   = BASE_BULLET_SIZE   + powerLevel * 4;
+      shotCooldown = Math.max(60, BASE_SHOT_COOLDOWN - powerLevel * 20);
+      damageFactor = 0.0; // potpuni štit dok bonus traje
+    }
+  }
+
+  // Provera da li je bonus istekao 
+  function updateBuff(t) {
+    if (buffActive && t >= buffEndTime) {
+      buffActive  = false;
+      bulletSpeed = BASE_BULLET_SPEED;
+      bulletSize  = BASE_BULLET_SIZE;
+      shotCooldown = BASE_SHOT_COOLDOWN;
+      damageFactor = 1.0; // opet primamo punu štetu
+    }
+  }
+
+ 
+  const player = createEntity(
+    Id(1),
+    Player(),
+    Position(canvasWidth/2, canvasHeight/2),
+    Velocity(0,0),
+    Size(14),
+    Health(100),
+    { theme: PLAYER_THEME }
+  );
+
+  let entities = [player];
+
+  
+  //restart dugme
+  const restartBtn = document.createElement('button');
+  restartBtn.id = 'restartBtn';
+  restartBtn.textContent = 'Restart game';
+  document.body.appendChild(restartBtn);
+
+  function resetGame() {
+    player.Position.x   = canvasWidth / 2;
+    player.Position.y   = canvasHeight / 2;
+    player.Health.value = 100;
+    score = 0;
+
+    // reset bonus stanja
+    powerLevel  = 0;
+    buffActive  = false;
+    buffEndTime = 0;
+    bulletSpeed  = BASE_BULLET_SPEED;
+    bulletSize   = BASE_BULLET_SIZE;
+    shotCooldown = BASE_SHOT_COOLDOWN;
+    damageFactor = 1.0;
+
+    entities = [player];
+    gameOver = false;
+    restartBtn.style.display = 'none';
+  }
+  restartBtn.addEventListener('click', resetGame);
+
+  //zvezde
+  const STAR_COUNT = 200;
+  const stars = Array.from({ length: STAR_COUNT }, () => ({
+    x: Math.random() * canvasWidth,
+    y: Math.random() * canvasHeight,
+    r: 0.4 + Math.random() * 1.4
+  }));
+
+  function drawStars() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    for (const s of stars) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.8)';
+      ctx.fill();
+    }
+  }
+
+  //input
+  const keyState = {};
+  addEventListener('keydown', e => keyState[e.key] = true);
+  addEventListener('keyup',   e => keyState[e.key] = false);
+
+  const mouseState = { x: canvasWidth/2, y: canvasHeight/2, clicking:false };
+
+  canvas.addEventListener('mousemove', e => {
+    const r = canvas.getBoundingClientRect();
+    mouseState.x = e.clientX - r.left; // pozicija misa u odnosu na canvas
+    mouseState.y = e.clientY - r.top;
+  });
+  canvas.addEventListener('mousedown', () => mouseState.clicking = true);
+  canvas.addEventListener('mouseup',   () => mouseState.clicking = false);
+
+
+  //sistemi
+  const inputSystem = (entities) => entities.map(e => {
+    if (e.Player && e.Position && e.Velocity) {
+      const speed = 4;
+      let vx = 0, vy = 0;
+      if (keyState['w'] || keyState['ArrowUp'])    vy -= speed;
+      if (keyState['s'] || keyState['ArrowDown'])  vy += speed;
+      if (keyState['a'] || keyState['ArrowLeft'])  vx -= speed;
+      if (keyState['d'] || keyState['ArrowRight']) vx += speed;
+      return { ...e, Velocity: { vx, vy } };
+    }
+    return e;
+  });
+
+  //pucanje
+  let lastShotTime = 0; //pravi pauzu izmedju metaka
+
+  const shootingSystem = (entities, t) => {
+    const p = entities.find(e => e.Player && e.Position);
+    if (!p) return entities;
+
+    const out = [...entities];
+
+    if (mouseState.clicking && t - lastShotTime > shotCooldown) { //proslo dovoljno vremena za pucanje
+      lastShotTime = t; //trenutak kad je metak ispaljen
+
+      const { x:px, y:py } = p.Position; //pozicija igraca
+      const dx = mouseState.x - px; //razlika izmedju pozicije misa i pozicije igraca
+      const dy = mouseState.y - py;
+      const len = Math.hypot(dx, dy) || 1; //ukupna udaljenost izmedju igraca i misa
+
+      const vx = dx/len * bulletSpeed; //normalizacija vektora, metak se krece istom brzinom uvek
+      const vy = dy/len * bulletSpeed;
+
+      out.push(
+        createEntity(
+          Id(Date.now()),
+          Bullet(),
+          Position(px, py),
+          Velocity(vx, vy),
+          Size(bulletSize) // menja se tokom bonusa
+        )
+      );
+    }
+    return out;
+  };
+
+  // enemy ai 
+  const enemyAISystem = (entities) => entities.map(e => {
+    if (e.Enemy && e.Position) {
+      const p = entities.find(x => x.Player && x.Position);
+      if (!p) return e;
+
+      const dx = p.Position.x - e.Position.x;
+      const dy = p.Position.y - e.Position.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const speed = 1.6;
+
+      return { ...e, Velocity: { vx:(dx/len)*speed, vy:(dy/len)*speed } };
+    }
+    return e;
+  });
+
+  //movement – primena brzine na poziciju
+  const movementSystem = (entities) => entities.map(e => {
+    if (e.Position && e.Velocity) {
+      const { x, y } = e.Position;
+      const { vx, vy } = e.Velocity;
+      return { ...e, Position: { x: x+vx, y: y+vy } };
+    }
+    return e;
+  });
+
+  // cleanup - metci van ekrana se brisu
+  const cleanupSystem = (entities) => entities.filter(e => {
+    if (e.Bullet && e.Position) {
+      const { x, y } = e.Position;
+      if (x < -20 || x > canvasWidth+20 || y < -20 || y > canvasHeight+20) {
+        return false;
+      }
+    }
+    return true;
+  });
+
+  // spawn– periodično pravljenje neprijatelja na ivicama ekrana
+  let lastSpawnTime = 0;
+  const spawnInterval = 1700;
+
+  const spawnSystem = (entities, t) => {
+    const out = [...entities];
+
+    if (t - lastSpawnTime > spawnInterval && !gameOver) { //neprijatelj se pravi ako je proslo dovoljno vr
+      lastSpawnTime = t;
+
+      const side = Math.floor(Math.random() * 4); // 0,1,2,3
+      let ex, ey;
+      if (side === 0)      { ex = Math.random()*canvasWidth; ey = -10;                }
+      else if (side === 1) { ex = canvasWidth+10;            ey = Math.random()*canvasHeight; }
+      else if (side === 2) { ex = Math.random()*canvasWidth; ey = canvasHeight+10;    }
+      else                 { ex = -10;                       ey = Math.random()*canvasHeight; }
+
+      const theme = ENEMY_THEMES[Math.floor(Math.random()*ENEMY_THEMES.length)];
+
+      out.push(
+        createEntity(
+          Id(Math.random()),
+          Enemy(),
+          Position(ex, ey),
+          Velocity(0, 0),
+          Size(11),
+          Health(30),
+          { theme, wobbleOffset: Math.random() * Math.PI * 2 }
+        )
+      );
+    }
+    return out;
+  };
+
+  //kolizije – metak vs neprijatelj
+  const collisionSystem = (entities) => {
+    const result = [];
+
+    for (const entity of entities) {
+      if (entity.Enemy && entity.Position && entity.Size) {
+        let hit = false;
+
+        for (const other of entities) {
+          if (other.Bullet && other.Position && other.Size) {
+            const dx = entity.Position.x - other.Position.x;
+            const dy = entity.Position.y - other.Position.y;
+            const distance = Math.hypot(dx, dy); //stvarna udaljenost izmedju centra neprijatelja i centra metka
+
+            if (distance < entity.Size.radius + other.Size.radius) { //ako je dist manji od zbira poluprecnika
+                //metka i neprijatelja
+              hit = true;
+              other._toRemove = true; // metak se briše
+              score += 10;
+              break;
+            }
+          }
+        }
+
+        if (!hit) {
+          result.push(entity);
+        }
+      } else {
+        if (!entity._toRemove) {
+          result.push(entity);
+        }
+      }
+    }
+    return result; //nova lista entiteta bez pogodjenih neprijatelja
+  };
+
+  // damage – neprijatelj dodiruje igrača -> HP--
+  const damageSystem = (entities) => {
+    const p = entities.find(e => e.Player && e.Position && e.Size && e.Health);
+    if (!p || gameOver) return entities;
+
+    entities.forEach(e => {
+      if (e.Enemy && e.Position && e.Size) {
+        const dx = p.Position.x - e.Position.x;
+        const dy = p.Position.y - e.Position.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist < p.Size.radius + e.Size.radius) {
+          // steta zavisi od damageFactor:
+          //  - ako nema bonusa: damageFactor = 1   -> normalna šteta
+          //  - dok bonus traje: damageFactor = 0   -> HP se NE skida
+          p.Health.value -= BASE_DAMAGE_PER_HIT * damageFactor;
+        }
+      }
+    });
+
+    if (p.Health.value <= 0 && !gameOver) {
+      gameOver = true;
+      restartBtn.style.display = 'block';
+    }
+
+    return entities;
+  };
+
+    //crtanje aliena
+  function drawAlien(x, y, r, angle, theme) {
+    const t = theme;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+
+    // aura (sjaj oko tanjira) - malo jači sjaj ako je buffActive
+    ctx.beginPath();
+    const extraGlow = buffActive ? 15 : 0;
+    ctx.arc(0, 0, r+6 + extraGlow, 0, Math.PI*2);
+    ctx.fillStyle = t.aura;
+    ctx.shadowColor = t.body;
+    ctx.shadowBlur  = buffActive ? 25 : 15;
+    ctx.fill();
+
+    // trup (leteći tanjir)
+    ctx.beginPath();
+    ctx.ellipse(0, 0, r+8, r*0.6, 0, 0, Math.PI*2);
+    ctx.fillStyle  = t.body;
+    ctx.fill();
+
+    // kupola
+    ctx.beginPath();
+    ctx.ellipse(0, -r*0.3, r*0.75, r*0.55, 0, 0, Math.PI*2);
+    ctx.fillStyle = t.dome;
+    ctx.fill();
+
+    // glava
+    ctx.beginPath();
+    ctx.arc(0, -r*0.45, r*0.35, 0, Math.PI*2);
+    ctx.fillStyle = t.head;
+    ctx.fill();
+
+    // oči
+    ctx.beginPath();
+    ctx.ellipse(-r*0.12, -r*0.48, r*0.09, r*0.14, 0, 0, Math.PI*2);
+    ctx.ellipse( r*0.12, -r*0.48, r*0.09, r*0.14, 0, 0, Math.PI*2);
+    ctx.fillStyle = '#001b1b';
+    ctx.fill();
+
+    // antena
+    ctx.beginPath();
+    ctx.moveTo(0, -r*0.7);
+    ctx.lineTo(0, -r*1.0);
+    ctx.strokeStyle = t.dome;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(0, -r*1.05, r*0.08, 0, Math.PI*2);
+    ctx.fillStyle = t.dome;
+    ctx.fill();
+
+    ctx.restore();
+    ctx.shadowBlur = 0;
+  }
+
+  //render
+  const renderSystem = (entities, t = 0) => {
+    drawStars(); // pozadina
+
+    entities.forEach(e => {
+      // player – baby pink svemirac koji gleda ka mišu
+      if (e.Player && e.Position && e.Size) {
+        const { x, y } = e.Position;
+        const { radius } = e.Size;
+        const dx = mouseState.x - x;
+        const dy = mouseState.y - y;
+        const angle = Math.atan2(dy, dx);//ugao u radijanama, player se okrece i gleda ka misu
+        drawAlien(x, y, radius, angle, PLAYER_THEME);
+      }
+
+      // enemy – svemirci raznih boja sa laganim "lebdenjem"
+      if (e.Enemy && e.Position && e.Size) {
+        const { x, y } = e.Position;
+        const { radius } = e.Size;
+
+        // mala animacija gore-dole
+        const wobble = Math.sin(t*0.005 + (e.wobbleOffset || 0)) * 6;
+
+        // orijentacija ka igraču
+        const p = entities.find(ent => ent.Player && ent.Position);
+        let angle = 0;
+        if (p) {
+          const dx = p.Position.x - x;
+          const dy = p.Position.y - (y + wobble);
+          angle = Math.atan2(dy, dx); 
+        }
+
+        const theme = e.theme || ENEMY_THEMES[0];
+        drawAlien(x, y + wobble, radius, angle, theme);
+      }
+
+      // metci – male kuglice (povećavaju se sa bonusom)
+      if (e.Bullet && e.Position && e.Size) {
+        const { x, y } = e.Position;
+        const { radius } = e.Size;
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI*2);
+        ctx.fillStyle = '#b76969';
+        ctx.shadowColor = '#b76969';
+        ctx.shadowBlur = 8;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    });
+
+    // brojač neprijatelja
+    const enemyCount = entities.reduce(
+      (acc, e) => e.Enemy ? acc + 1 : acc,
+      0
+    );
+
+    // HUD
+    ctx.fillStyle = '#00e6c3';
+    ctx.font = '14px monospace';
+    ctx.fillText(`HP: ${player.Health.value.toFixed(0)}`, 12, 20); //prikaz hp bez decimala
+    ctx.fillText(`Score: ${score}`, canvas.width - 140, 20);
+    ctx.fillText(`Enemies: ${enemyCount}`, canvas.width/2 - 60, 20);
+    ctx.fillText(`Bonus lvl: ${powerLevel}`, 12, 40);
+    ctx.fillText(`Shield: ${buffActive ? 'ON' : 'OFF'}`, 12, 60);
+
+    if (gameOver) {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = '#ff4d88';
+      ctx.font = '48px monospace';
+      ctx.fillText('GAME OVER', canvas.width/2 - 150, canvas.height/2 - 20);
+
+      ctx.font = '18px monospace';
+      ctx.fillText('Klikni na dugme "Restart game"', canvas.width/2 - 160, canvas.height/2 + 20);
+    }
+
+    return entities;
+  };
+
+  //update i gameloop
+  const updateGame = (entities, t) => {
+    let cur = entities;
+
+    if (!gameOver) {
+      // prvo ažuriramo vreme trajanja bonusa
+      updateBuff(t);
+      // zatim proverimo da li score traži novi bonus
+      checkBonus(t);
+
+      cur = inputSystem(cur);
+      cur = shootingSystem(cur, t);
+      cur = enemyAISystem(cur);
+      cur = movementSystem(cur);
+      cur = cleanupSystem(cur);
+      cur = spawnSystem(cur, t);
+      cur = collisionSystem(cur);
+      cur = damageSystem(cur);
+    }
+
+    cur = renderSystem(cur, t);
+    return cur;
+  };
+
+  function gameLoop(t) {
+    entities = updateGame(entities, t || 0);
+    requestAnimationFrame(gameLoop);
+  }
+  requestAnimationFrame(gameLoop);
+</script>
+</html>
+
