@@ -1,5 +1,8 @@
 # Neon Arena Game
 
+
+![Gameplay](game.png)
+
 Neon Arena is a 2D arcade-style survival game built with JavaScript and HTML Canvas using an ECS (Entity Component System) architecture.
 
 The project focuses on real-time gameplay systems, enemy AI behavior, collision detection, rendering pipelines, and dynamic difficulty scaling inspired by game-engine architecture.
